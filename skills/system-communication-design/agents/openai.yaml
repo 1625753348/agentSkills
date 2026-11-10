@@ -1,0 +1,4 @@
+interface:
+  display_name: "System Communication Design"
+  short_description: "Design implementable communication and auth"
+  default_prompt: "Design the external and internal communication architecture for this system, including protocol choices, reliability, authentication and authorization. After the decisions are clear, generate sequence diagrams, contracts, code skeletons, and verification tests."

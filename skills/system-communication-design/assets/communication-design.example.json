@@ -1,0 +1,238 @@
+{
+  "version": "1.0",
+  "system": {
+    "name": "Agent streaming reference",
+    "actors": [
+      "web-client",
+      "api-gateway",
+      "run-api",
+      "stream-api",
+      "orchestrator",
+      "tool-worker",
+      "event-broker"
+    ],
+    "constraints": {
+      "latency_budget_ms": 800,
+      "active_streams_peak": 5000,
+      "reconnect_window_minutes": 30,
+      "delivery": "at_least_once",
+      "tenant_isolation": true
+    }
+  },
+  "interaction_paths": [
+    {
+      "id": "create-run",
+      "kind": "command",
+      "protocol": "https",
+      "latency_budget_ms": 300,
+      "auth": "OIDC BFF session",
+      "reliability": "Idempotency-Key plus bounded retry"
+    },
+    {
+      "id": "stream-run",
+      "kind": "server_to_client_stream",
+      "protocol": "sse",
+      "latency_budget_ms": 800,
+      "auth": "HttpOnly session cookie plus subscription authorization",
+      "reliability": "Last-Event-ID replay plus snapshot fallback"
+    },
+    {
+      "id": "cancel-run",
+      "kind": "command",
+      "protocol": "https",
+      "latency_budget_ms": 300,
+      "auth": "OIDC BFF session plus run:cancel policy",
+      "reliability": "Idempotent compare-and-set"
+    }
+  ],
+  "external_channels": [
+    {
+      "id": "run-events",
+      "name": "Run event stream",
+      "type": "sse",
+      "endpoint": "GET /v1/runs/{run_id}/events",
+      "direction": "server_to_client",
+      "auth": "Same-origin HttpOnly session cookie, Origin check, per-run authorization",
+      "reliability": {
+        "retry": {
+          "strategy": "exponential_full_jitter",
+          "base_ms": 500,
+          "cap_ms": 30000
+        },
+        "resume": {
+          "cursor_header": "Last-Event-ID",
+          "durable_replay": true
+        },
+        "heartbeat_ms": 15000,
+        "idle_timeout_ms": 45000,
+        "server_buffer": {
+          "max_events": 256,
+          "high_watermark_pct": 70,
+          "low_watermark_pct": 40,
+          "overflow_policy": "coalesce deltas, then disconnect slow client for snapshot resync"
+        },
+        "client_buffer": {
+          "max_events": 1000,
+          "max_bytes": 8388608,
+          "overflow_policy": "coalesce render updates and request snapshot resync"
+        }
+      }
+    },
+    {
+      "id": "run-command",
+      "name": "Run command API",
+      "type": "http",
+      "endpoint": "POST /v1/runs",
+      "direction": "request_response",
+      "auth": "OIDC BFF session plus run:create policy",
+      "reliability": {
+        "timeout_ms": 3000,
+        "idempotency": "Idempotency-Key scoped to user and endpoint",
+        "retry": "Only retry idempotent requests with bounded backoff and jitter"
+      }
+    }
+  ],
+  "internal_channels": [
+    {
+      "id": "agent-events",
+      "name": "Agent lifecycle and result events",
+      "type": "durable_stream",
+      "topics": [
+        "agent.run.requested",
+        "agent.run.started",
+        "agent.run.completed",
+        "agent.run.failed",
+        "agent.run.cancelled",
+        "agent.approval.required",
+        "agent.approval.resolved",
+        "tool.call.completed"
+      ],
+      "partition_key": "tenant_id:run_id",
+      "auth": "mTLS workload identity plus topic ACL",
+      "reliability": {
+        "delivery": "at_least_once",
+        "ordering": "per run_id partition",
+        "idempotency": "inbox table keyed by event_id; business idempotency key for side effects",
+        "outbox": true,
+        "retry": {
+          "max_attempts": 5,
+          "base_ms": 250,
+          "cap_ms": 30000
+        },
+        "dlq": "agent-events-dlq",
+        "replay": true,
+        "retention": "30 days for facts; token deltas are coalesced and only checkpoints are durable"
+      }
+    }
+  ],
+  "contracts": {
+    "envelope": "CloudEvents 1.0",
+    "schema": "AsyncAPI 3.0.0 plus JSON Schema 2020-12",
+    "compatibility": "Additive optional fields are backward compatible; removals require a major version",
+    "required_fields": [
+      "specversion",
+      "id",
+      "source",
+      "type",
+      "tenantid",
+      "runid",
+      "correlationid",
+      "idempotencykey"
+    ],
+    "event_types": [
+      "agent.run.requested",
+      "agent.run.completed",
+      "agent.run.failed",
+      "agent.run.cancelled",
+      "agent.approval.required",
+      "agent.approval.resolved"
+    ]
+  },
+  "security": {
+    "user_authentication": "OIDC Authorization Code with PKCE through a BFF and HttpOnly Secure SameSite session cookie",
+    "service_authentication": "mTLS workload identity with audience-scoped short-lived credentials",
+    "authorization": "Tenant and resource policy for create/read/cancel/approve/subscribe/invoke",
+    "transport": "TLS 1.2 or newer; prefer TLS 1.3",
+    "token_lifecycle": "Short-lived access tokens; close or re-authenticate long-lived streams at expiry",
+    "stream_authentication": "Cookie session or single-use short-lived ticket; authorize each run subscription",
+    "origin_policy": "Explicit HTTPS origin allowlist; credentialed CORS never uses wildcard",
+    "webhook": "Timestamped HMAC verification with replay window and idempotency",
+    "secrets": "Managed secret store with rotation, overlap windows, and audit",
+    "audit": "Log authentication, authorization denial, stream subscription, approval, cancellation, and tool calls"
+  },
+  "implementation": {
+    "phases": [
+      {
+        "id": "phase-1",
+        "name": "Contracts and security skeleton",
+        "exit_gate": "OpenAPI/AsyncAPI schemas validate and unauthorized/cross-tenant tests fail closed"
+      },
+      {
+        "id": "phase-2",
+        "name": "Run state, idempotency, and outbox",
+        "exit_gate": "Duplicate create and process restart produce one run and no lost event"
+      },
+      {
+        "id": "phase-3",
+        "name": "Broker consumers, inbox, retry, and DLQ",
+        "exit_gate": "Duplicate and poison messages have deterministic outcomes"
+      },
+      {
+        "id": "phase-4",
+        "name": "SSE event store, replay, heartbeat, and bounded queues",
+        "exit_gate": "Reconnect and cursor expiry recover correctly through the real gateway"
+      },
+      {
+        "id": "phase-5",
+        "name": "Client state machine and snapshot recovery",
+        "exit_gate": "Network drop, token expiry, and slow rendering do not corrupt state"
+      },
+      {
+        "id": "phase-6",
+        "name": "Observability, load, chaos, and rollout",
+        "exit_gate": "SLOs hold at peak and canary rollback is rehearsed"
+      }
+    ],
+    "observability": [
+      "active streams and reconnect duration",
+      "time to first event and event delivery latency",
+      "replay count and snapshot reset count",
+      "server/client buffer depth and slow-client disconnects",
+      "outbox age, consumer lag, retry count, and DLQ count",
+      "auth failures, forbidden subscriptions, and approval audit"
+    ],
+    "tests": [
+      "network drop and reconnect replay",
+      "expired cursor snapshot recovery",
+      "duplicate delivery and inbox deduplication",
+      "consumer restart before acknowledgement",
+      "token expiry and unauthorized subscription",
+      "slow client backpressure",
+      "cancel retry and stale approval",
+      "reconnect storm load test"
+    ]
+  },
+  "decisions": [
+    {
+      "decision": "External streaming data plane",
+      "selected": "fetch-compatible SSE with durable replay and snapshot fallback",
+      "alternatives": [
+        "native EventSource with cookie-only auth",
+        "WebSocket for all traffic",
+        "long polling"
+      ],
+      "rationale": "Most output is server-to-client text/progress; HTTP deployment and replay are simpler than a duplex socket."
+    },
+    {
+      "decision": "Internal durable coordination",
+      "selected": "partitioned durable stream plus transactional outbox and inbox deduplication",
+      "alternatives": [
+        "in-process Spring ApplicationEventPublisher only",
+        "asynchronous @EventListener without persistence",
+        "synchronous chained service calls"
+      ],
+      "rationale": "Run completion, approvals, and tool side effects must survive process failure and duplicate delivery."
+    }
+  ]
+}
+
