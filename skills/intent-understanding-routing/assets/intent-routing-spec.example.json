@@ -1,0 +1,108 @@
+{
+  "schema_version": "1.0",
+  "router_library": {
+    "name": "semantic-router",
+    "constraint": ">=1,<2",
+    "router_type": "indexed"
+  },
+  "scope": {
+    "domains": ["order", "refund", "product", "account"],
+    "languages": ["zh-CN", "en"],
+    "channels": ["chat"],
+    "risk_policy": "high-risk actions require confirmation and policy authorization"
+  },
+  "routes": [
+    {
+      "name": "order.status",
+      "utterances": [
+        "我的订单到哪了",
+        "帮我查一下物流",
+        "包裹什么时候到",
+        "订单怎么还没发货",
+        "Where is my order?"
+      ],
+      "description": "仅查询已有订单的状态、物流和预计送达，不处理退款、取消或改地址。",
+      "handler": "order_status_pipeline",
+      "risk_level": "low",
+      "confidence_threshold": 0.86,
+      "requires_confirmation": false
+    },
+    {
+      "name": "refund.create",
+      "utterances": [
+        "我要退款",
+        "帮我申请退货退款",
+        "收到商品损坏了，怎么退",
+        "商品和描述不一样，我要退",
+        "I want my money back"
+      ],
+      "description": "发起退款或退货退款申请，不处理退款进度查询。",
+      "handler": "refund_pipeline",
+      "risk_level": "high",
+      "confidence_threshold": 0.94,
+      "requires_confirmation": true
+    },
+    {
+      "name": "inventory.report_send",
+      "utterances": [
+        "查询本月库存低于警戒线的SKU并生成Excel",
+        "把库存预警清单做成表格",
+        "整理低库存商品并发给采购经理",
+        "导出库存报告给采购负责人",
+        "Check low inventory and send an Excel report"
+      ],
+      "description": "查询并分析库存条件，生成文件，再按授权发送给指定收件人。发送前必须确认来源、收件人和数据范围。",
+      "handler": "inventory_workflow",
+      "risk_level": "high",
+      "confidence_threshold": 0.95,
+      "requires_confirmation": true
+    }
+  ],
+  "fallback": {
+    "business_miss_policy": "risk_gated",
+    "chitchat_handler": "low_cost_chitchat_model",
+    "clarification_handler": "clarify_missing_business_information",
+    "human_handler": "human_handoff",
+    "risk_gate": [
+      "order_or_product_entity",
+      "payment_or_account_terms",
+      "write_or_external_action",
+      "safety_or_human_request",
+      "pending_task_state"
+    ],
+    "cheap_model_tool_access": false
+  },
+  "calibration": {
+    "method": "platt",
+    "uses_held_out_queries": true,
+    "null_examples": 40,
+    "thresholds_selected_from_held_out_data": true
+  },
+  "evaluation": {
+    "slices": [
+      "business_positive",
+      "hard_negative",
+      "none_or_chitchat",
+      "ambiguous",
+      "multi_intent",
+      "context_switch",
+      "safety",
+      "noise_and_code_switch"
+    ],
+    "metrics": [
+      "route_accuracy",
+      "per_route_recall",
+      "none_rejection_rate",
+      "clarification_rate",
+      "false_execution_rate",
+      "task_completion_rate",
+      "p95_routing_latency"
+    ]
+  },
+  "execution": {
+    "policy_engine_separate": true,
+    "tool_gateway_validation": true,
+    "max_actions_per_request": 8,
+    "audit_trace_required": true
+  }
+}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Intent Understanding & Routing"
+  short_description: "Build calibrated intent routing into agent projects"
+  default_prompt: "Use $intent-understanding-routing when building or refactoring an agent, chatbot, ecommerce, or conversational AI project. Design and implement the intent understanding and routing engine, including multi-intent Intent IR, Semantic Router configuration, pipeline dispatch, chitchat fallback, safety boundaries, and evaluation."
